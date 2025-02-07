@@ -1,0 +1,3 @@
+# Dependencies list
+typer[all]
+questionary
