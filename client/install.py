@@ -3,68 +3,157 @@ import sys
 import platform
 import subprocess
 import json
-import importlib.util
+import shutil
+import ctypes  # Used for checking admin privileges on Windows
+import argparse  # For handling command-line flags
 
 CONFIG_DIR = os.path.expanduser("~/.leo_cli")
 VENV_DIR = os.path.join(CONFIG_DIR, "venv")
-VENV_PYTHON = os.path.join(VENV_DIR, "bin", "python3") if platform.system() != "Windows" else os.path.join(VENV_DIR, "Scripts", "python.exe")
-CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+BIN_DIR = os.path.join(CONFIG_DIR, "bin")
+FLAGS_FILE = os.path.join(CONFIG_DIR, "install_flags.json")
+LEO_SCRIPT_WIN = os.path.join(BIN_DIR, "leo.cmd")
+LEO_SCRIPT_LINUX = os.path.join(BIN_DIR, "leo")
+VENV_PYTHON = os.path.join(VENV_DIR, "bin", "python") if platform.system() != "Windows" else os.path.join(VENV_DIR, "Scripts", "python.exe")
 
-def is_running_inside_venv():
-    """Check if the script is currently running inside the virtual environment."""
-    return sys.prefix == VENV_DIR
+parser = argparse.ArgumentParser()
+parser.add_argument("-l", "--loud", action="store_true", help="Show full installation output")
+args = parser.parse_args()
+
+def run_command(command, hide_output=True, shell=False):
+    """Run a command silently unless --loud flag is used."""
+    if args.loud:
+        subprocess.run(command, check=True, shell=shell)
+    else:
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=shell)
+
+def is_admin():
+    """Check if script is running with administrator privileges (Windows only)."""
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+
+
+def load_flags():
+    """Load the installation flags to check completed steps."""
+    if os.path.exists(FLAGS_FILE):
+        with open(FLAGS_FILE, "r") as file:
+            return json.load(file)
+    return {}
+
+
+def save_flags(flags):
+    """Save updated installation flags."""
+    with open(FLAGS_FILE, "w") as file:
+        json.dump(flags, file, indent=4)
+
+
 
 def create_virtualenv():
-    """Create a virtual environment for LEO CLI if it doesn't exist."""
-    if not os.path.exists(VENV_DIR):
-        print("🔹 Creating a virtual environment...")
-        subprocess.run([sys.executable, "-m", "venv", VENV_DIR], check=True)
+    """Create a virtual environment if it doesn’t exist."""
+    flags = load_flags()
+    if flags.get("venv_created"):
+        print("✅ Virtual environment already exists. Skipping...")
+        return
 
-def restart_in_venv():
-    """Restart the script inside the virtual environment if it's not already inside."""
-    if not is_running_inside_venv():
-        print("🔹 Restarting inside virtual environment...")
-        os.execv(VENV_PYTHON, [VENV_PYTHON] + sys.argv)
+    print("🔹 Creating virtual environment...")
+    run_command([sys.executable, "-m", "venv", VENV_DIR])
+    flags["venv_created"] = True
+    save_flags(flags)
 
-def install_dependencies():
-    """Install all required dependencies inside the virtual environment."""
-    pip_executable = os.path.join(VENV_DIR, "bin", "pip") if platform.system() != "Windows" else os.path.join(VENV_DIR, "Scripts", "pip.exe")
 
-    # Ensure pip is up to date
-    subprocess.run([pip_executable, "install", "--upgrade", "pip"], check=True)
+def create_executable():
+    """Create a global 'leo' command that always runs inside venv."""
+    flags = load_flags()
+    os.makedirs(BIN_DIR, exist_ok=True)
 
-    # Install requirements
-    print("🔹 Installing dependencies inside virtual environment...")
-    subprocess.run([pip_executable, "install", "-r", "requirements.txt"], check=True)
-    print("✅ Dependencies installed.")
+    if platform.system() == "Windows":
+        if flags.get("leo_cmd_created"):
+            print("✅ 'leo' command already exists. Skipping...")
+            return
+        with open(LEO_SCRIPT_WIN, "w") as f:
+            f.write(f"@echo off\n\"{VENV_PYTHON}\" \"{os.path.join(os.getcwd(), 'leo.py')}\" %*\n")
+        flags["leo_cmd_created"] = True
+        save_flags(flags)
+        print("✅ Created 'leo' command for Windows.")
 
-def install_questionary():
-    """Ensure `questionary` is available inside the virtual environment."""
-    pip_executable = os.path.join(VENV_DIR, "bin", "pip") if platform.system() != "Windows" else os.path.join(VENV_DIR, "Scripts", "pip.exe")
+    else:
+        if flags.get("leo_script_created"):
+            print("✅ 'leo' command already exists. Skipping...")
+            return
+        with open(LEO_SCRIPT_LINUX, "w") as f:
+            f.write(f"#!/bin/bash\n\"{VENV_PYTHON}\" \"{os.path.join(os.getcwd(), 'leo.py')}\" \"$@\"\n")
+        os.chmod(LEO_SCRIPT_LINUX, 0o755)
+        flags["leo_script_created"] = True
+        save_flags(flags)
+        print("✅ Created 'leo' command for Linux/macOS.")
 
-    if importlib.util.find_spec("questionary") is None:
-        print("🔹 `questionary` not found. Installing it inside the virtual environment...")
-        subprocess.run([pip_executable, "install", "questionary"], check=True)
-        print("✅ Installed `questionary` inside virtual environment.")
 
-def detect_and_store_os():
-    """Detect the OS and store it in the config file."""
-    detected_os = platform.system()
-    config_data = {"os": detected_os}
+def add_to_path():
+    """Add ~/.leo_cli/bin (or Windows equivalent) to PATH."""
+    flags = load_flags()
+    if flags.get("path_added"):
+        print("✅ PATH already updated. Skipping...")
+        return
 
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(CONFIG_FILE, "w") as file:
-        json.dump(config_data, file, indent=4)
+    if platform.system() == "Windows":
+        PATH_CMD = f'setx PATH "%PATH%;{BIN_DIR}"'
+        run_command(PATH_CMD, hide_output=False)
+        flags["path_added"] = True
+        save_flags(flags)
+        print(f"✅ Added '{BIN_DIR}' to system PATH. Restart your terminal to use 'leo'.")
 
-    print(f"✅ OS detected: {detected_os}. Stored in {CONFIG_FILE}")
+    else:
+        BASHRC = os.path.expanduser("~/.bashrc")
+        ZSHRC = os.path.expanduser("~/.zshrc")
+        export_cmd = f'export PATH="{BIN_DIR}:$PATH"'
+
+        for shell_rc in [BASHRC, ZSHRC]:
+            if os.path.exists(shell_rc):
+                with open(shell_rc, "a") as f:
+                    f.write(f"\n# Add LEO CLI to PATH\n{export_cmd}\n")
+
+        flags["path_added"] = True
+        save_flags(flags)
+        print(f"✅ Added '{BIN_DIR}' to system PATH. Restart your terminal or run 'source ~/.bashrc'.")
+
+
+def setup_file_associations():
+    """Ensure Windows executes 'leo' as a command."""
+    flags = load_flags()
+    if platform.system() != "Windows" or flags.get("file_associations_set"):
+        return
+
+    if is_admin():
+        print("🔹 Ensuring Windows executes 'leo' as a command...")
+        subprocess.run(["cmd.exe", "/c", "assoc .leo=Python.File"], check=True)
+        subprocess.run(["cmd.exe", "/c", f"ftype Python.File={VENV_PYTHON} %1 %*"], check=True)
+        flags["file_associations_set"] = True
+        save_flags(flags)
+        print("✅ 'leo' is now recognized as a Python script.")
+    else:
+        print("⚠️ Skipped file association changes (requires Administrator privileges).")
+        print("ℹ️ To manually set file associations, run:")
+        print('   cmd.exe /c "assoc .leo=Python.File"')
+        print(f'   cmd.exe /c "ftype Python.File={VENV_PYTHON} %1 %*"')
+
+
+def run_as_admin():
+    """Re-run the script as administrator if needed (Windows only)."""
+    if platform.system() == "Windows" and not is_admin():
+        print("⚠️ Some setup steps require administrator privileges.")
+        print("🔹 Re-run the script as administrator to complete setup:")
+        print(f"   powershell Start-Process python -ArgumentList \"install.py\" -Verb RunAs")
+
 
 if __name__ == "__main__":
     print("🚀 Setting up LEO CLI...")
 
     create_virtualenv()
-    restart_in_venv()  # Ensure we are inside the virtual environment before proceeding
-    install_dependencies()
-    install_questionary()
-    detect_and_store_os()
+    create_executable()
+    add_to_path()
+    setup_file_associations()
+    run_as_admin()  # Show message if admin privileges are needed
 
-    print("🎉 LEO CLI is ready! Use `source ~/.leo_cli/venv/bin/activate` to start using it.")
+    print("🎉 LEO CLI is ready! Try running:")
+    print("   leo --help")

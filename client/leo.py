@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import typer
 from modules.executor import CommandExecutionModule
 from modules.logger import LoggerModule
 from modules.secrets import SecretsModule
